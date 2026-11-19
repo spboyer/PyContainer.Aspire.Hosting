@@ -3,7 +3,7 @@
 Aspire can already publish .NET projects as container images without a
 Dockerfile or a running Docker daemon. This adapter brings the same experience
 to Aspire Python apps: one call replaces the Dockerfile build and push for a
-Python resource with [pycontainer-build](../../README.md), so `aspire publish`,
+Python resource with [pycontainer-build](https://github.com/spboyer/pycontainer-build), so `aspire publish`,
 `aspire deploy` and `aspire do push` need neither Docker nor Podman.
 
 `aspire run` is unchanged. In run mode `WithPyContainerBuild` does nothing.
