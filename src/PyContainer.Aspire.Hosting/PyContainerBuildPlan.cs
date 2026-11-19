@@ -26,9 +26,8 @@ internal sealed record PyContainerBuildPlan(
     internal const string GeneratedRoot = ".pycontainer-aspire";
 
     // Host virtualenvs contain host binaries, so they must be excluded explicitly to force target-compatible
-    // staging. The generated requirements directory cannot be excluded: pycontainer applies the same excludes
-    // when locating the requirements file.
-    private static readonly string[] s_dependencyExcludes = [".venv", "venv", "env"];
+    // staging. The generated requirements file is still used for staging, but stays out of the app layer.
+    private static readonly string[] s_dependencyExcludes = [".venv", "venv", "env", GeneratedRoot];
 
     public static PyContainerBuildPlan Create(
         string resourceName,
