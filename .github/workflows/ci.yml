@@ -4,16 +4,160 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+  repository_dispatch:
+    types: [pycontainer-updated]
+
+permissions:
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           dotnet-version: |
             8.0.x
             10.0.x
       - run: dotnet test tests/PyContainer.Aspire.Hosting.Tests
       - run: dotnet build samples/AppHost
+
+  resolve:
+    name: Resolve pycontainer-build commits
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      pinned: ${{ steps.refs.outputs.pinned }}
+      main: ${{ steps.refs.outputs.main }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: refs
+        env:
+          DISPATCH_SHA: ${{ github.event.client_payload.sha }}
+        run: |
+          pinned=$(tr -d '[:space:]' < eng/pycontainer.ref)
+          main=${DISPATCH_SHA:-$(git ls-remote https://github.com/spboyer/pycontainer-build refs/heads/main | cut -f1)}
+          for sha in "$pinned" "$main"; do
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid commit SHA: '$sha'" >&2; exit 1; }
+          done
+          echo "pinned=$pinned" >> "$GITHUB_OUTPUT"
+          echo "main=$main" >> "$GITHUB_OUTPUT"
+
+  e2e:
+    name: Publish without a container runtime (pycontainer ${{ matrix.pycontainer }})
+    needs: [test, resolve]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        pycontainer: [pinned, main]
+    env:
+      PYCONTAINER_SHA: ${{ matrix.pycontainer == 'pinned' && needs.resolve.outputs.pinned || needs.resolve.outputs.main }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.6"
+
+      - name: Install pycontainer-build
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "git+https://github.com/spboyer/pycontainer-build@${PYCONTAINER_SHA}"
+          echo "pycontainer-build: \`${PYCONTAINER_SHA}\` (${{ matrix.pycontainer }})" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Start a TLS registry
+        run: |
+          certs="$RUNNER_TEMP/certs"
+          mkdir -p "$certs"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=localhost" \
+            -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
+            -keyout "$certs/registry.key" -out "$certs/registry.crt"
+          sudo cp "$certs/registry.crt" /usr/local/share/ca-certificates/e2e-registry.crt
+          sudo update-ca-certificates
+          sudo mkdir -p /etc/docker/certs.d/localhost:5443
+          sudo cp "$certs/registry.crt" /etc/docker/certs.d/localhost:5443/ca.crt
+          docker run -d --name registry -p 5443:5443 -v "$certs:/certs:ro" \
+            -e REGISTRY_HTTP_ADDR=0.0.0.0:5443 \
+            -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/registry.crt \
+            -e REGISTRY_HTTP_TLS_KEY=/certs/registry.key \
+            registry:2
+          for _ in $(seq 30); do curl -fsS https://localhost:5443/v2/ && exit 0; sleep 1; done
+          docker logs registry; exit 1
+
+      # docker and podman are replaced by stubs that fail, so any use of a container runtime fails the job.
+      - name: Publish the sample
+        env:
+          SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+        run: |
+          stubs="$RUNNER_TEMP/no-container-runtime"
+          mkdir -p "$stubs"
+          for tool in docker podman; do
+            printf '#!/bin/sh\necho "%s must not be called during publish" >&2\nexit 97\n' "$tool" > "$stubs/$tool"
+            chmod +x "$stubs/$tool"
+          done
+          set -o pipefail
+          PATH="$stubs:$PATH" env \
+            'Parameters__registry-endpoint=localhost:5443' \
+            'Parameters__registry-repository=samples' \
+            dotnet run --project samples/AppHost -- --operation publish --step push --output-path "$RUNNER_TEMP/out" \
+            2>&1 | tee "$RUNNER_TEMP/publish.log"
+          if grep -q "must not be called" "$RUNNER_TEMP/publish.log"; then exit 1; fi
+
+      # The AppHost can exit 0 when a pipeline step fails, so success is judged by the registry and the running image.
+      - name: Verify the pushed image serves HTTP
+        run: |
+          curl -fsS https://localhost:5443/v2/samples/api/tags/list | grep -q '"latest"'
+          docker run -d --name api -p 8000:8000 localhost:5443/samples/api:latest main:app --host 0.0.0.0 --port 8000
+          for _ in $(seq 60); do curl -fsS http://localhost:8000/ && exit 0; sleep 1; done
+          docker logs api; exit 1
+
+  bump:
+    name: Open a pycontainer-build bump pull request
+    needs: [resolve, e2e]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.resolve.outputs.main != needs.resolve.outputs.pinned
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.resolve.outputs.main }}
+          PINNED: ${{ needs.resolve.outputs.pinned }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          branch=chore/bump-pycontainer
+          echo "$SHA" > eng/pycontainer.ref
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C "$branch"
+          git commit -am "chore: bump pycontainer-build to ${SHA:0:7}"
+          git push --force origin "$branch"
+          title="chore: bump pycontainer-build to ${SHA:0:7}"
+          body=$(printf '%s\n' \
+            "Moves \`eng/pycontainer.ref\` from \`${PINNED:0:7}\` to \`${SHA:0:7}\`." \
+            "" \
+            "Changes: https://github.com/spboyer/pycontainer-build/compare/${PINNED}...${SHA}" \
+            "" \
+            "Validated by the end-to-end publish in ${RUN_URL}. Pull requests opened by the workflow token do not start CI themselves.")
+          if [ "$(gh pr view "$branch" --json state --jq .state 2>/dev/null)" = "OPEN" ]; then
+            gh pr edit "$branch" --title "$title" --body "$body"
+          else
+            gh pr create --base main --head "$branch" --title "$title" --body "$body"
+          fi

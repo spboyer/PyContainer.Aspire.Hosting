@@ -36,6 +36,14 @@ inferred from the Aspire model:
   advisories.
 - `pycontainer` on `PATH` in the environment that runs the AppHost, with `pip`
   available to its interpreter (dependency staging installs target wheels).
+  The adapter needs pycontainer-build newer than `v0.3.1` (it uses
+  `--exclude`), so install the tested commit from
+  [`eng/pycontainer.ref`](eng/pycontainer.ref):
+
+  ```powershell
+  pip install "git+https://github.com/spboyer/pycontainer-build@$(Get-Content eng/pycontainer.ref)"
+  ```
+
   To use a checkout or a specific interpreter:
 
   ```csharp
@@ -133,3 +141,26 @@ with no `docker` or `podman` on `PATH`, `--step push` built the sample and
 pushed it to a TLS `registry:2`. The pulled image (linux/amd64, entrypoint
 `python -m uvicorn`) then served HTTP 200. Docker was used only to host the
 test registry and run the result.
+
+## Staying in sync with pycontainer-build
+
+The adapter runs the `pycontainer` CLI, so the contract is its flags and
+`[build]` keys, not a library API.
+
+- `eng/pycontainer.ref` pins the pycontainer-build commit this repository is
+  tested against.
+- CI (`.github/workflows/ci.yml`) runs the unit tests, then an end-to-end
+  publish on Linux against both the pinned commit and current pycontainer
+  `main`. It pushes the sample to a TLS `registry:2` with `docker` and
+  `podman` replaced by failing stubs, then runs the pushed image and requires
+  HTTP 200.
+- The `main` leg runs on pushes, pull requests, daily, on demand, and when
+  pycontainer-build sends a `pycontainer-updated` dispatch. When it passes on
+  a newer commit, CI opens or updates a `chore/bump-pycontainer` pull request
+  that moves the pin.
+- pycontainer-build's `tests/test_aspire_contract.py` fails if a flag or key
+  the adapter uses changes, so breaking changes are caught upstream first.
+
+Bump pull requests are created with the workflow token, so GitHub does not
+start CI for them; the run that opened the pull request is the validation and
+is linked in its description.
