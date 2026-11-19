@@ -40,6 +40,7 @@ public class PyContainerBuildPlanTests
                 "--no-progress",
                 "--base-image", "python:3.12-slim",
                 "--exclude", ".venv", "--exclude", "venv", "--exclude", "env",
+                "--exclude", ".pycontainer-aspire",
             ],
             plan.BuildArguments);
     }

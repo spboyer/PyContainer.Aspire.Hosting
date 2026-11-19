@@ -108,12 +108,8 @@ contain host binaries. Dependencies are installed for the Linux target instead.
 - Dependency staging is wheel-only CPython for `linux/amd64` and
   `linux/arm64`. See the pycontainer README for details.
 - `uv export` creates `uv.lock` when the project has none.
-- The exported requirements file is copied into the image at
-  `/app/.pycontainer-aspire/<resource>/requirements.txt`, because pycontainer
-  applies context excludes when locating the requirements file.
-- The push step rebuilds the image, and dependency layers are not yet
-  byte-for-byte reproducible, so the pushed digest can differ from the
-  `build-<name>` output.
+- The push step rebuilds the image instead of reusing the `build-<name>`
+  output.
 
 Changes in Aspire that would remove the workarounds: a public Python
 entrypoint annotation, and a pluggable image builder and registry login that do
